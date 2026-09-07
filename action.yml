@@ -1,0 +1,22 @@
+name: 'Agent Memory Doctor'
+description: >
+  Boot-time integrity check for AI agent memory & convention files
+  (AGENTS.md, MEMORY.md, rules indexes) — catches silent convention loss,
+  injection dilution, and broken rollback anchors. Zero dependencies.
+branding:
+  icon: 'shield'
+  color: 'purple'
+inputs:
+  config:
+    description: 'Path to doctor.json (run `python agent_memory_doctor.py --init` once to create it, then commit it)'
+    required: false
+    default: 'doctor.json'
+  extra-args:
+    description: 'Additional CLI args, e.g. "--json --state .doctor-state.json". Note: exit code 1 (FAIL) fails the workflow step — that is the point.'
+    required: false
+    default: ''
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      run: python "${{ github.action_path }}/agent_memory_doctor.py" --config "${{ inputs.config }}" ${{ inputs.extra-args }}

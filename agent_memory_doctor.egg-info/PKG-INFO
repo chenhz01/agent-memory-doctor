@@ -1,3 +1,29 @@
+Metadata-Version: 2.4
+Name: agent-memory-doctor
+Version: 1.4.0
+Summary: Boot-time integrity check for AI agent memory & convention files — catch silent convention loss, injection dilution, broken rollback anchors.
+Author: agent-memory-doctor contributors
+License: Apache-2.0
+Project-URL: Homepage, https://github.com/chenhz01/agent-memory-doctor
+Project-URL: Repository, https://github.com/chenhz01/agent-memory-doctor
+Project-URL: Issues, https://github.com/chenhz01/agent-memory-doctor/issues
+Keywords: ai-agents,llm,memory,healthcheck,agents-md,claude,cursor
+Classifier: Development Status :: 4 - Beta
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Topic :: Software Development :: Quality Assurance
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
 # agent-memory-doctor
 
 [![CI](https://github.com/chenhz01/agent-memory-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/chenhz01/agent-memory-doctor/actions/workflows/ci.yml)
