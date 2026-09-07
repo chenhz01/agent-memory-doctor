@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 tests/fixture/.memory/
 /doctor.json
+.doctor-state.json
+tests/fixture/run-state.json
+tests/fixture/target.txt

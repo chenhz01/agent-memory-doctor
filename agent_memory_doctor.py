@@ -8,16 +8,23 @@ This tool turns "I thought it was there" into a pass/fail report at boot time.
 
 Zero dependencies (stdlib only). Python 3.8+.
 
+v1.1 changes (from adversarial design review, see docs/DEEPSEEK-REVIEW.md):
+  - self-check freshness: --state records last run; stale runs emit WARN
+  - supply-chain: known_hashes (SHA256) tamper detection for checked files
+  - rollback anchor viability: archive must contain all convention fingerprints
+
 Usage:
     python agent_memory_doctor.py --init                    # write config template
     python agent_memory_doctor.py                           # run with doctor.json
     python agent_memory_doctor.py --config my.json          # run with custom config
+    python agent_memory_doctor.py --state .doctor-state.json
     python agent_memory_doctor.py --workspace /path/to/proj # also check project-level memory
     python agent_memory_doctor.py --json                    # machine-readable output
 
-Exit codes: 0 = all critical checks passed, 1 = at least one FAIL.
+Exit codes: 0 = no critical FAIL, 1 = at least one FAIL, 2 = config error.
 """
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -43,11 +50,13 @@ CONFIG_TEMPLATE = {
     "archive": {
         "path": "~/.memory/archive/MEMORY-full-backup.md",
         "label": "full memory archive",
-        "_comment": "Rollback anchor. Checked for existence (FAIL) and non-trivial size (WARN < 1KB).",
+        "_comment": "Rollback anchor. Checked for existence, non-trivial size, and that it still contains all markers (otherwise restoring it would silently drop your conventions).",
     },
+    "staleness_days": 7,
+    "_comment_staleness": "If --state is used and the last run is older than this, emit WARN: your boot check itself has a freshness requirement.",
+    "known_hashes": {},
+    "_comment_known_hashes": "Supply-chain tamper detection: map of file path -> sha256 hex. Mismatch = FAIL. Generate with: python -c \"import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())\" <file>",
 }
-
-MEMORY_LIMIT_DEFAULT = 4000
 
 
 def expand(p):
@@ -59,13 +68,13 @@ def check(name, ok, detail, warn=False):
             "detail": detail}
 
 
-def run(cfg_path, workspace=None, as_json=False):
+def run(cfg_path, workspace=None, as_json=False, state_path=None):
     with open(cfg_path, encoding="utf-8") as f:
         raw = json.load(f)
     cfg = {k: v for k, v in raw.items() if not k.startswith("_")}
 
     mem_path = expand(cfg.get("memory_file", ""))
-    limit = int(cfg.get("char_limit", MEMORY_LIMIT_DEFAULT))
+    limit = int(cfg.get("char_limit", 4000))
     results = []
 
     # Check 1 — required files exist (identity + rules)
@@ -80,15 +89,15 @@ def run(cfg_path, workspace=None, as_json=False):
     mem = ""
     if os.path.isfile(mem_path):
         mem = open(mem_path, encoding="utf-8", errors="ignore").read()
-        missing = [m for m in cfg.get("markers", [])
-                   if m.get("pattern", "") not in mem]
+        markers = cfg.get("markers", [])
+        missing = [m for m in markers if m.get("pattern", "") not in mem]
         if missing:
             labels = [f"{m.get('label', '?')} ({m.get('pattern', '')[:30]})" for m in missing]
             results.append(check("markers", False,
                                  f"missing fingerprints: {labels} — restore from archive"))
         else:
             results.append(check("markers", True,
-                                 f"{len(cfg.get('markers', []))} fingerprints in place"))
+                                 f"{len(markers)} fingerprints in place"))
     else:
         results.append(check("memory_file", False, f"not found: {mem_path}"))
 
@@ -100,7 +109,7 @@ def run(cfg_path, workspace=None, as_json=False):
                          else " — AUDIT_REQUIRED: backup -> archive -> slim -> verify"),
                          warn=over))
 
-    # Check 4 — archive (rollback anchor)
+    # Check 4 — archive (rollback anchor): exists, non-trivial, still holds fingerprints
     arch = cfg.get("archive") or {}
     if arch.get("path"):
         ap = expand(arch["path"])
@@ -110,11 +119,59 @@ def run(cfg_path, workspace=None, as_json=False):
             if size < 1024:
                 results.append(check("archive_size", False, f"suspiciously small ({size}B)",
                                      warn=True))
+            arch_content = open(ap, encoding="utf-8", errors="ignore").read()
+            lost = [m.get("label", "?") for m in cfg.get("markers", [])
+                    if m.get("pattern", "") and m["pattern"] not in arch_content]
+            if lost:
+                results.append(check("archive_markers", False,
+                                     f"archive lacks fingerprints {lost} — restoring it would "
+                                     f"silently drop those conventions; re-archive first",
+                                     warn=True))
+            else:
+                results.append(check("archive_markers", True,
+                                     f"archive still holds all {len(cfg.get('markers', []))} fingerprints"))
         else:
             results.append(check(f"archive:{arch.get('label', 'backup')}", False,
                                  f"missing rollback anchor: {ap}"))
 
-    # Check 5 — project-level (L2) memory dir, optional
+    # Check 5 — supply-chain: known SHA256 hashes (v1.1, review Agent O/AA)
+    for rel, expected in (cfg.get("known_hashes") or {}).items():
+        p = expand(rel)
+        if not os.path.isfile(p):
+            results.append(check(f"hash:{rel}", False, f"file missing: {p}", warn=True))
+            continue
+        actual = hashlib.sha256(open(p, "rb").read()).hexdigest()
+        if actual != expected:
+            results.append(check(f"hash:{rel}", False,
+                                 f"SHA256 drifted — file changed since fingerprint (tamper or upgrade): {p}"))
+        else:
+            results.append(check(f"hash:{rel}", True, "SHA256 match"))
+
+    # Check 6 — self-check freshness (v1.1, review event "50 sessions without a check")
+    if state_path:
+        now = datetime.now().timestamp()
+        last = None
+        if os.path.isfile(state_path):
+            try:
+                last = float(json.load(open(state_path, encoding="utf-8")).get("last_run", 0))
+            except (ValueError, OSError):
+                last = None
+        stale_days = int(cfg.get("staleness_days", 7))
+        if last is None:
+            results.append(check("freshness", False,
+                                 "no previous run recorded (first run?) — "
+                                 "re-run regularly, boot checks rot too", warn=True))
+        else:
+            age_days = (now - last) / 86400
+            results.append(check("freshness", age_days <= stale_days,
+                                 f"last run {age_days:.1f} days ago"
+                                 + ("" if age_days <= stale_days
+                                    else f" — exceeds staleness_days={stale_days}, re-audit advised"),
+                                 warn=age_days > stale_days))
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"last_run": now, "iso": datetime.now().isoformat(timespec="seconds")}, f)
+
+    # Check 7 — project-level (L2) memory dir, optional
     if workspace:
         l2 = os.path.join(workspace, ".memory")  # adjust to your agent's layout
         results.append(check("workspace_memory", os.path.isdir(l2),
@@ -136,7 +193,7 @@ def run(cfg_path, workspace=None, as_json=False):
     if as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print(f"=== agent-memory-doctor | {report['time']} ===")
+        print(f"=== agent-memory-doctor v1.1.0 | {report['time']} ===")
         for r in results:
             icon = {"PASS": "[ OK ]", "WARN": "[WARN]", "FAIL": "[FAIL]"}[r["status"]]
             print(f"{icon} {r['name']} — {r['detail']}")
@@ -161,6 +218,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--config", default="doctor.json")
     ap.add_argument("--workspace", default=None, help="project dir to check L2 memory")
+    ap.add_argument("--state", default=None,
+                    help="state file recording last run (enables freshness check)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--init", action="store_true", help="write a config template")
     args = ap.parse_args()
@@ -169,7 +228,7 @@ def main():
     if not os.path.isfile(args.config):
         print(f"config not found: {args.config} (run with --init to create one)")
         sys.exit(2)
-    sys.exit(run(args.config, args.workspace, args.json))
+    sys.exit(run(args.config, args.workspace, args.json, args.state))
 
 
 if __name__ == "__main__":
