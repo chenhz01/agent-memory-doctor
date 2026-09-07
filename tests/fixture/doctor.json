@@ -26,8 +26,5 @@
   "archive": {
     "path": ".memory/archive/full.md",
     "label": "full memory archive"
-  },
-  "known_hashes": {
-    "target.txt": "d121be3103007b41edf96f8262925f8c7d61894afe9a041843b631f69445bc57"
   }
 }

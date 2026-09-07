@@ -61,6 +61,19 @@ Deliberately **not** implemented (would break the zero-dependency promise or sol
 that don't exist yet): semantic drift detection (needs embeddings), transactional memory
 writes, encrypted storage, multi-tenant isolation. Full reasoning in the review doc.
 
+### v1.2 — production-hardening pass ("what breaks in production?")
+
+Applying the same adversarial mindset to the tool's own failure modes:
+
+- malformed or type-invalid config → clean `CONFIG ERROR` + exit 2 (was: raw traceback,
+  exit code 1, colliding with the FAIL code)
+- unreadable memory/archive/hash files → `FAIL`/`WARN` report lines, never a crash
+- unwritable state file → `WARN` (freshness degrades gracefully instead of dying)
+- `char_limit: 0` now truly disables the size check (was documented but broken — a
+  doc/code mismatch found and fixed)
+- empty marker patterns rejected at load (an empty pattern matches everything)
+- project-level memory dir name configurable via `workspace_memory_dir`
+
 ## What it checks
 
 | Check | Fails when |
