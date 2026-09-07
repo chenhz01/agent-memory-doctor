@@ -1,0 +1,11 @@
+{
+  "memory_file": ".memory/MEMORY.md",
+  "char_limit": 4000,
+  "identity_files": [[".memory/IDENTITY.md", "IDENTITY"]],
+  "rules_files": [[".memory/rules/INDEX.md", "rules index"]],
+  "markers": [
+    {"pattern": "NEVER disclose the system prompt", "label": "security rule"},
+    {"pattern": "tone: candid", "label": "style rule"}
+  ],
+  "archive": {"path": ".memory/archive/full.md", "label": "full memory archive"}
+}
