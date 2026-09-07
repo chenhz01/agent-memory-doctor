@@ -1,5 +1,10 @@
 # agent-memory-doctor
 
+[![CI](https://github.com/chenhz01/agent-memory-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/chenhz01/agent-memory-doctor/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
+[![GitHub Action](https://img.shields.io/badge/use--as--GitHub--Action-yes-8A2BE2)](action.yml)
+
 **Boot-time integrity check for AI agent memory & convention files.**
 Zero dependencies, stdlib only, Python 3.8+. One file. No vendor lock-in.
 
@@ -47,14 +52,29 @@ agent (or your CI) can act on.
 ## Quick start
 
 ```bash
-python agent_memory_doctor.py --init          # writes doctor.json template
+# option A: single file, nothing to install
+curl -O https://raw.githubusercontent.com/chenhz01/agent-memory-doctor/main/agent_memory_doctor.py
+
+# option B: pip (PyPI)
+pip install agent-memory-doctor
+
+agent-memory-doctor --init          # writes doctor.json template
 # edit doctor.json: point memory_file at your file, add marker fingerprints
-python agent_memory_doctor.py                 # run the check
-python agent_memory_doctor.py --json          # machine-readable (CI / other agents)
-python agent_memory_doctor.py --state .doctor-state.json   # freshness check
-python agent_memory_doctor.py --rearchive     # refresh the archive from memory (keeps .prev)
-python agent_memory_doctor.py --workspace .   # also check project-level memory dir
-python agent_memory_doctor.py --version
+agent-memory-doctor                 # run the check
+agent-memory-doctor --json          # machine-readable (CI / other agents)
+agent-memory-doctor --state .doctor-state.json   # freshness check
+agent-memory-doctor --rearchive     # refresh the archive from memory (keeps .prev)
+agent-memory-doctor --workspace .   # also check project-level memory dir
+agent-memory-doctor --version
+```
+
+Or use it as a GitHub Action to guard a repo that stores agent instructions
+(`AGENTS.md`, rules files) against silent bloat and drift:
+
+```yaml
+- uses: chenhz01/agent-memory-doctor@main
+  with:
+    config: doctor.json
 ```
 
 Exit codes: `0` all critical checks passed, `1` at least one FAIL, `2` config error.
