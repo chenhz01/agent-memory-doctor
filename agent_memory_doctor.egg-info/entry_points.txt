@@ -1,2 +1,0 @@
-[console_scripts]
-agent-memory-doctor = agent_memory_doctor:main
