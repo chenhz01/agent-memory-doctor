@@ -50,7 +50,7 @@ import shutil
 import sys
 from datetime import datetime
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 CONFIG_TEMPLATE = {
     "memory_file": "~/.memory/MEMORY.md",

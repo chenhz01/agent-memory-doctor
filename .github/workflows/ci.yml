@@ -23,5 +23,5 @@ jobs:
       - name: Smoke — version + config template parses
         run: |
           python agent_memory_doctor.py --version
-          python agent_memory_doctor.py --init doctor.json
+          python agent_memory_doctor.py --init
           python -c "import json;json.load(open('doctor.json'))"
