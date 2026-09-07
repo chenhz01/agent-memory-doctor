@@ -144,7 +144,7 @@ domains (finance, healthcare, legal). Partners get:
 - integration support for your framework (LangChain / AutoGen / CrewAI / custom)
 
 If that's you: open an [issue](../../issues) or reach out by email —
-**530416460@qq.com** with subject `[agent-memory-doctor partnership]`.
+**hcac4735@agent.qq.com** with subject `[agent-memory-doctor partnership]`.
 
 ## Development
 
@@ -176,7 +176,7 @@ claimed as shipped when it isn't.
 设计过程经过四轮、每轮 200 次的多智能体对抗评审（记忆一致性/并发/供应链/事务/恢复
 幂等等维度），开源版是其中"零依赖即可落地"的第一层。完整协议蓝图（记忆分层、语义
 双指纹、自愈引擎、事务写入、多租户隔离）通过合作计划推进——详见
-[ROADMAP.md](ROADMAP.md)，合作意向请邮件 **530416460@qq.com**（标题注明
+[ROADMAP.md](ROADMAP.md)，合作意向请邮件 **hcac4735@agent.qq.com**（标题注明
 `[agent-memory-doctor partnership]`）。
 
 ## License
