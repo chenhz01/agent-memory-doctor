@@ -135,9 +135,12 @@ def main():
         rc, out, _ = run_doctor(root, "--config", "badregex.json")
         test("T11 invalid regex -> exit 2", rc == 2 and "regex invalid" in out, out)
 
-        # T12 — --version
+        # T12 — --version must match pyproject.toml (prevents version drift)
+        import pathlib, re as _re
+        _pp = pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
+        _pv = _re.search(r'version = "([^"]+)"', _pp.read_text(encoding="utf-8")).group(1)
         rc, out, _ = run_doctor(root, "--version")
-        test("T12 --version", rc == 0 and "v1.3.0" in out, out)
+        test("T12 --version", rc == 0 and f"v{_pv}" in out, out)
 
         # T13 — hash tamper detection
         cfg = json.load(open(os.path.join(root, "doctor.json")))
