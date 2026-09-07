@@ -1,14 +1,7 @@
 # agent-memory-doctor
 
-Boot-time integrity check for AI agent memory & convention files. Zero dependencies, stdlib only, Python 3.8+.
-
-**The problem it solves** — if you run a long-lived AI agent (personal assistant, agent framework, "digital employee"), you probably store its persona, rules and conventions in memory files (`MEMORY.md`, `IDENTITY.md`, rules indexes...). Three failure modes are silent:
-
-1. **Silent convention loss** — you swap models or start a new session, and rules that were "obviously remembered" are simply gone. Nobody notices until the agent misbehaves.
-2. **Injection dilution** — the memory file grows past the size that gets injected verbatim, so everything is *technically* stored but *effectively* half-lost through summarization.
-3. **Broken rollback anchor** — you keep a backup/archive for recovery, but nothing verifies the backup still exists until the day you need it.
-
-`agent-memory-doctor` turns all three into a boot-time pass/fail report.
+**Boot-time integrity check for AI agent memory & convention files.**
+Zero dependencies, stdlib only, Python 3.8+. One file. No vendor lock-in.
 
 ```
 === agent-memory-doctor | 2026-09-07 20:41:12 ===
@@ -20,17 +13,36 @@ Boot-time integrity check for AI agent memory & convention files. Zero dependenc
 === BOOT WARN: 1 warning(s) + audit required ===
 ```
 
-## The hygiene loop
+## The problem
 
-The tool is one half of a maintenance loop the author runs in production:
+If you run a long-lived AI agent (personal assistant, agent framework, "digital
+employee"), you probably store its persona, rules and conventions in memory files
+(`MEMORY.md`, `IDENTITY.md`, rules indexes...). Three failure modes are **silent**:
 
-```
-backup -> archive -> slim (keep critical rules verbatim, everything else as pointers)
-   ^                                                          |
-   +----------------- doctor reports AUDIT_REQUIRED ---------+
-```
+1. **Silent convention loss** — you swap models or start a new session, and rules
+   that were "obviously remembered" are simply gone. Nobody notices until the agent
+   misbehaves.
+2. **Injection dilution** — the memory file grows past the size that gets injected
+   verbatim, so everything is *technically* stored but *effectively* half-lost
+   through summarization.
+3. **Broken rollback anchor** — you keep a backup for recovery, but nothing verifies
+   the backup still exists until the day you need it.
 
-Key design rule learned the hard way: **critical rules must stay verbatim in the injected file** — a pointer to an archive file is useless for a rule the agent must apply without reading anything.
+`agent-memory-doctor` turns all three into a boot-time pass/fail report that your
+agent (or your CI) can act on.
+
+## What it checks (Open Edition)
+
+| Check | Fails when |
+|---|---|
+| `file:*` | identity/rules files listed in config are missing |
+| `markers` | a fingerprint pattern is no longer verbatim in the memory file (restore from archive) |
+| `memory_size` | memory file exceeds `char_limit` → emits `AUDIT_REQUIRED` (WARN, not FAIL — size is health, not breakage) |
+| `archive:*` | rollback archive missing; warns if suspiciously small (<1KB) |
+| `archive_markers` | archive no longer contains the fingerprints (restoring it would silently drop conventions) |
+| `hash:*` | a file listed in `known_hashes` changed since fingerprinting (tamper or upgrade) |
+| `freshness` | last recorded run (via `--state`) is older than `staleness_days` |
+| `workspace_memory` | optional: project-level memory dir not initialized |
 
 ## Quick start
 
@@ -45,51 +57,12 @@ python agent_memory_doctor.py --workspace .   # also check project-level memory 
 python agent_memory_doctor.py --version
 ```
 
-Exit codes: `0` all critical checks passed, `1` at least one FAIL, `2` config missing.
+Exit codes: `0` all critical checks passed, `1` at least one FAIL, `2` config error.
+The JSON verdict (`BOOT OK / WARN / FAIL`, `audit_required`) is designed to be consumed
+by the agent itself, so it knows whether its own memory is trustworthy before doing work.
 
-## Adversarial design review (v1.1)
-
-Before release, the v1 design went through a multi-agent adversarial review (see
-[docs/DEEPSEEK-REVIEW.md](docs/DEEPSEEK-REVIEW.md)). Three findings were cheap enough to
-fix in pure stdlib and are now part of the tool:
-
-| Finding | Fix in v1.1 |
-|---|---|
-| The boot check itself rots — nothing proves it ran recently | `--state FILE` records the last run; older than `staleness_days` → `WARN` |
-| Supply-chain: the checked files (and config) can be tampered with | `known_hashes`: SHA256 fingerprints; drift → `FAIL` |
-| A rollback archive that lost the fingerprints restores silence-loss, not memory | `archive_markers`: archive must still contain all fingerprints, else `WARN` + re-archive hint |
-
-Deliberately **not** implemented (would break the zero-dependency promise or solve problems
-that don't exist yet): semantic drift detection (needs embeddings), transactional memory
-writes, encrypted storage, multi-tenant isolation. Full reasoning in the review doc.
-
-### v1.2 — production-hardening pass ("what breaks in production?")
-
-Applying the same adversarial mindset to the tool's own failure modes:
-
-- malformed or type-invalid config → clean `CONFIG ERROR` + exit 2 (was: raw traceback,
-  exit code 1, colliding with the FAIL code)
-- unreadable memory/archive/hash files → `FAIL`/`WARN` report lines, never a crash
-- unwritable state file → `WARN` (freshness degrades gracefully instead of dying)
-- `char_limit: 0` now truly disables the size check (was documented but broken — a
-  doc/code mismatch found and fixed)
-- empty marker patterns rejected at load (an empty pattern matches everything)
-- project-level memory dir name configurable via `workspace_memory_dir`
-
-## What it checks
-
-| Check | Fails when |
-|---|---|
-| `file:*` | identity/rules files listed in config are missing |
-| `markers` | a fingerprint pattern is no longer verbatim in the memory file (restore from archive) |
-| `memory_size` | memory file exceeds `char_limit` → emits `AUDIT_REQUIRED` (WARN, not FAIL — size is health, not breakage) |
-| `archive:*` | rollback archive missing; warns if suspiciously small (<1KB) |
-| `archive_markers` | archive no longer contains the fingerprints (restoring it would silently drop conventions) |
-| `hash:*` | a file listed in `known_hashes` changed since fingerprinting (tamper or upgrade) |
-| `freshness` | last recorded run (via `--state`) is older than `staleness_days` |
-| `workspace_memory` | optional: project-level memory dir not initialized |
-
-## Config reference
+<details>
+<summary>Config reference</summary>
 
 ```jsonc
 {
@@ -110,27 +83,68 @@ Applying the same adversarial mindset to the tool's own failure modes:
 
 Keys starting with `_` are comments and ignored. Paths support `~`.
 
-## Run it in CI / as an automation
+</details>
 
-```yaml
-- run: python agent_memory_doctor.py --config doctor.json --json
+## The hygiene loop
+
+The tool is one half of a maintenance loop that runs in production (guarding a
+memory system with 400+ skills behind it):
+
+```
+backup -> archive -> slim (keep critical rules verbatim, everything else as pointers)
+   ^                                                          |
+   +----------------- doctor reports AUDIT_REQUIRED ---------+
 ```
 
-Or let your agent call it as the first action of every session — the JSON verdict (`BOOT OK / WARN / FAIL`, `audit_required`) is designed to be consumed by the agent itself, so it knows whether its own memory is trustworthy before starting work.
+Key design rule learned the hard way: **critical rules must stay verbatim in the
+injected file** — a pointer to an archive file is useless for a rule the agent must
+apply without reading anything.
 
-## The audit loop, closed
+## How it was designed
 
-`AUDIT_REQUIRED` tells you to *backup -> archive -> slim -> verify*. The backup step is
-built in:
+This is not a weekend script. The design went through **four rounds of 200-round
+multi-agent adversarial reviews** (memory consistency, concurrency, supply-chain,
+transactions, recovery idempotency...), plus a production-hardening pass on its own
+failure modes. The full review archive is public: [docs/DEEPSEEK-REVIEW.md](docs/DEEPSEEK-REVIEW.md).
 
-```bash
-python agent_memory_doctor.py --rearchive
-```
+Each round produced a fail-safe / fail-loud behavior that shipped:
 
-This copies the current memory file over the archive path, keeping the previous archive
-as `<path>.prev`. It refuses to run if the memory file itself is unreadable (never
-archive garbage over a good backup). After re-archiving, the `archive_markers` warning
-clears if the fingerprints are present in the fresh archive.
+| Review finding | Shipped as |
+|---|---|
+| the boot check itself rots — nothing proves it ran recently | `--state` freshness check (v1.1) |
+| the checked files (and config) can be tampered with | `known_hashes` SHA256 tamper detection (v1.1) |
+| a rollback archive that lost the fingerprints restores silence-loss, not memory | `archive_markers` (v1.1) |
+| malformed config crashed with an ambiguous exit code | clean `CONFIG ERROR` + exit 2 (v1.2) |
+| unreadable files / unwritable state | degrade to report lines, never crash (v1.2) |
+| the audit loop told you to back up but didn't do it | `--rearchive` with `.prev` safety copy (v1.3) |
+
+## Roadmap — from a checker to a boot-check protocol
+
+The four review rounds converged on a full **memory boot-check protocol**: tiered
+memory (core-convention / working / long-term / audit-log zones), dual fingerprints
+(verbatim + semantic), auto-repair with rollback, transactional memory writes,
+multi-tenant isolation, and compliance-grade audit trails.
+
+Not everything belongs in a zero-dependency single file, and not everything ships
+for free. See [ROADMAP.md](ROADMAP.md) for what lands in the open edition vs. what
+is developed through the partnership program.
+
+## Partnership edition
+
+The open edition checks your memory files **before** things go wrong. The protocol
+work goes further: **detect → re-inject → self-repair → prove**.
+
+We are looking for design partners who run agents where silent memory loss is
+expensive — agent platforms, automation vendors, and teams in compliance-heavy
+domains (finance, healthcare, legal). Partners get:
+
+- early access to the protocol design (memory tiering, semantic fingerprints,
+  auto-repair engine, transactional writes, multi-tenant isolation)
+- influence on the spec before it freezes
+- integration support for your framework (LangChain / AutoGen / CrewAI / custom)
+
+If that's you: open an [issue](../../issues) or reach out by email —
+**530416460@qq.com** with subject `[agent-memory-doctor partnership]`.
 
 ## Development
 
@@ -138,16 +152,33 @@ clears if the fingerprints are present in the fresh archive.
 python tests/run_tests.py     # 14-scenario suite, builds its own fixture, exit code 0/1
 ```
 
-CI runs the suite on Linux / Windows / macOS across Python 3.8–3.13 (`.github/workflows/ci.yml`).
+CI runs the suite on Linux / Windows / macOS across Python 3.8–3.13
+(`.github/workflows/ci.yml`).
 
 ## Honest positioning
 
-This is **not** another SKILL.md / agent-skill linter — that space is well served (check out `skillscheck`, `check-skills`, `askl`). This tool checks the **memory and convention layer**: the files that must be present, intact and within size budgets *before* the agent reads any skill.
+This is **not** another SKILL.md / agent-skill linter — that space is well served
+(check out `skillscheck`, `check-skills`, `askl`). This tool checks the **memory and
+convention layer**: the files that must be present, intact and within size budgets
+*before* the agent reads any skill.
+
+Roadmap items are labeled for what they are: some are planned for the open edition,
+some exist as finished protocol designs available through partnership — nothing is
+claimed as shipped when it isn't.
 
 ## 中文简介
 
-给长期运行的 AI Agent 的"开机自检"：换模型/换会话后约定是否还在（指纹抽查）、记忆文件是否超过注入上限（超限自动触发瘦身审计流程）、回滚备份是否健在。零依赖单文件，`--init` 生成配置模板即可接入你自己的记忆目录结构。作者在生产环境用它守护一套 400+ skill 的 Agent 记忆体系。
+给长期运行的 AI Agent 的"开机自检"：换模型/换会话后约定是否还在（指纹抽查）、记忆
+文件是否超过注入上限（超限自动触发瘦身审计流程）、回滚备份是否健在。零依赖单文件，
+`--init` 生成配置模板即可接入你自己的记忆目录结构。作者在生产环境用它守护一套
+400+ skill 的 Agent 记忆体系。
+
+设计过程经过四轮、每轮 200 次的多智能体对抗评审（记忆一致性/并发/供应链/事务/恢复
+幂等等维度），开源版是其中"零依赖即可落地"的第一层。完整协议蓝图（记忆分层、语义
+双指纹、自愈引擎、事务写入、多租户隔离）通过合作计划推进——详见
+[ROADMAP.md](ROADMAP.md)，合作意向请邮件 **530416460@qq.com**（标题注明
+`[agent-memory-doctor partnership]`）。
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).
