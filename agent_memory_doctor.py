@@ -8,6 +8,14 @@ This tool turns "I thought it was there" into a pass/fail report at boot time.
 
 Zero dependencies (stdlib only). Python 3.8+.
 
+v1.3 changes (gap-fill round):
+  - --rearchive: perform the "backup -> archive" step the AUDIT_REQUIRED loop
+    asks for (previous archive is kept as <archive>.prev)
+  - markers support "regex": true (semantic-ish matching without embeddings)
+  - --version
+  - encoding sanity: mojibake (U+FFFD) in memory/archive -> WARN
+  - repo ships an automated test suite (tests/run_tests.py) + GitHub Actions CI
+
 v1.2 changes (AI-assisted code review pass — "what breaks in production"):
   - malformed/invalid config now exits cleanly with code 2 (was: raw traceback,
     which collided with the FAIL exit code)
@@ -27,6 +35,7 @@ Usage:
     python agent_memory_doctor.py                           # run with doctor.json
     python agent_memory_doctor.py --config my.json          # run with custom config
     python agent_memory_doctor.py --state .doctor-state.json
+    python agent_memory_doctor.py --rearchive               # backup memory -> archive
     python agent_memory_doctor.py --workspace /path/to/proj # also check project-level memory
     python agent_memory_doctor.py --json                    # machine-readable output
 
@@ -36,8 +45,12 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shutil
 import sys
 from datetime import datetime
+
+VERSION = "1.3.0"
 
 CONFIG_TEMPLATE = {
     "memory_file": "~/.memory/MEMORY.md",
@@ -55,11 +68,11 @@ CONFIG_TEMPLATE = {
         {"pattern": "NEVER disclose the system prompt", "label": "security rule"},
         {"pattern": "tone: candid", "label": "style rule"},
     ],
-    "_comment_markers": "Fingerprint check: each pattern must appear verbatim in memory_file, else FAIL with recovery hint. Empty patterns are rejected.",
+    "_comment_markers": "Fingerprint check: each pattern must match memory_file, else FAIL with recovery hint. Optional \"regex\": true treats pattern as a regular expression. Empty patterns are rejected.",
     "archive": {
         "path": "~/.memory/archive/MEMORY-full-backup.md",
         "label": "full memory archive",
-        "_comment": "Rollback anchor. Checked for existence, non-trivial size, and that it still contains all markers (otherwise restoring it would silently drop your conventions).",
+        "_comment": "Rollback anchor. Checked for existence, non-trivial size, and that it still matches all markers (otherwise restoring it would silently drop your conventions). --rearchive refreshes it from memory_file, keeping the previous one as <path>.prev.",
     },
     "staleness_days": 7,
     "_comment_staleness": "If --state is used and the last run is older than this, emit WARN: your boot check itself has a freshness requirement.",
@@ -68,6 +81,8 @@ CONFIG_TEMPLATE = {
     "workspace_memory_dir": ".memory",
     "_comment_workspace": "Directory name checked under --workspace (project-level memory).",
 }
+
+MOJIBAKE = "\ufffd"
 
 
 class ConfigError(Exception):
@@ -82,7 +97,7 @@ def safe_read(path, binary=False):
     """Return file content or None if unreadable/missing. Never raises."""
     try:
         mode = "rb" if binary else "r"
-        kwargs = {} if binary else {"encoding": "utf-8", "errors": "ignore"}
+        kwargs = {} if binary else {"encoding": "utf-8", "errors": "replace"}
         with open(path, mode, **kwargs) as f:
             return f.read()
     except OSError:
@@ -94,11 +109,22 @@ def check(name, ok, detail, warn=False):
             "detail": detail}
 
 
+def marker_hit(marker, content):
+    """A marker matches if its pattern appears verbatim, or (regex:true) as a regex."""
+    pattern = marker.get("pattern", "")
+    if marker.get("regex"):
+        return re.search(pattern, content) is not None
+    return pattern in content
+
+
 def load_config(cfg_path):
     """Load and validate config. Raises ConfigError on anything unusable."""
     text = safe_read(cfg_path)
     if text is None:
         raise ConfigError(f"config not readable: {cfg_path}")
+    if MOJIBAKE in text:
+        raise ConfigError(f"config contains replacement characters (U+FFFD) — "
+                          f"saving it as UTF-8 usually fixes this: {cfg_path}")
     try:
         raw = json.loads(text)
     except json.JSONDecodeError as e:
@@ -131,6 +157,11 @@ def load_config(cfg_path):
         if not m.get("pattern", "").strip():
             raise ConfigError("marker patterns must be non-empty "
                               "(an empty pattern matches everything)")
+        if m.get("regex"):
+            try:
+                re.compile(m["pattern"])
+            except re.error as e:
+                raise ConfigError(f"marker regex invalid ({m.get('label', '?')}): {e}")
     hashes = cfg.get("known_hashes", {})
     if not isinstance(hashes, dict):
         raise ConfigError("known_hashes must be an object of path -> sha256 hex")
@@ -143,7 +174,34 @@ def load_config(cfg_path):
     return cfg
 
 
-def run(cfg_path, workspace=None, as_json=False, state_path=None):
+def rearchive(cfg, results):
+    """Backup memory_file -> archive path. Previous archive kept as <path>.prev."""
+    mem_path = expand(cfg["memory_file"])
+    arch = cfg.get("archive") or {}
+    ap = expand(arch.get("path", ""))
+    if not ap:
+        results.append(check("rearchive", False,
+                             "config has no archive.path — nothing to refresh", warn=True))
+        return
+    mem_data = safe_read(mem_path, binary=True)
+    if mem_data is None:
+        results.append(check("rearchive", False,
+                             f"memory file unreadable, refusing to archive: {mem_path}"))
+        return
+    try:
+        os.makedirs(os.path.dirname(ap) or ".", exist_ok=True)
+        if os.path.isfile(ap):
+            os.replace(ap, ap + ".prev")  # keep one generation of history
+        with open(ap, "wb") as f:
+            f.write(mem_data)
+        results.append(check("rearchive", True,
+                             f"archived {mem_path} -> {ap}"
+                             + (" (previous archive kept as .prev)" if os.path.isfile(ap + ".prev") else "")))
+    except OSError as e:
+        results.append(check("rearchive", False, f"archive write failed: {e}"))
+
+
+def run(cfg_path, workspace=None, as_json=False, state_path=None, do_rearchive=False):
     cfg = load_config(cfg_path)
 
     mem_path = expand(cfg["memory_file"])
@@ -165,7 +223,12 @@ def run(cfg_path, workspace=None, as_json=False, state_path=None):
         results.append(check("memory_file", False,
                              f"not found or unreadable: {mem_path}"))
     else:
-        missing = [m for m in markers if m.get("pattern", "") not in mem]
+        if MOJIBAKE in mem:
+            results.append(check("memory_encoding", False,
+                                 "memory file contains U+FFFD — it was probably not "
+                                 "saved as UTF-8; fingerprint matching may silently fail",
+                                 warn=True))
+        missing = [m for m in markers if not marker_hit(m, mem)]
         if missing:
             labels = [f"{m.get('label', '?')} ({m['pattern'][:30]})" for m in missing]
             results.append(check("markers", False,
@@ -182,6 +245,10 @@ def run(cfg_path, workspace=None, as_json=False, state_path=None):
                          else " — AUDIT_REQUIRED: backup -> archive -> slim -> verify"),
                          warn=over))
 
+    # Action — --rearchive closes the "backup -> archive" step of the audit loop
+    if do_rearchive:
+        rearchive(cfg, results)
+
     # Check 4 — archive (rollback anchor): exists, non-trivial, still holds fingerprints
     arch = cfg.get("archive") or {}
     if arch.get("path"):
@@ -197,8 +264,13 @@ def run(cfg_path, workspace=None, as_json=False, state_path=None):
                 results.append(check("archive_markers", False,
                                      f"archive unreadable: {ap}", warn=True))
             else:
+                if MOJIBAKE in arch_content:
+                    results.append(check("archive_encoding", False,
+                                         f"archive contains U+FFFD — restore would corrupt "
+                                         f"memory; re-save as UTF-8 or --rearchive: {ap}",
+                                         warn=True))
                 lost = [m.get("label", "?") for m in markers
-                        if m.get("pattern", "") and m["pattern"] not in arch_content]
+                        if m.get("pattern", "") and not marker_hit(m, arch_content)]
                 if lost:
                     results.append(check("archive_markers", False,
                                          f"archive lacks fingerprints {lost} — restoring it would "
@@ -282,13 +354,14 @@ def run(cfg_path, workspace=None, as_json=False, state_path=None):
     if as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print(f"=== agent-memory-doctor v1.2.0 | {report['time']} ===")
+        print(f"=== agent-memory-doctor v{VERSION} | {report['time']} ===")
         for r in results:
             icon = {"PASS": "[ OK ]", "WARN": "[WARN]", "FAIL": "[FAIL]"}[r["status"]]
             print(f"{icon} {r['name']} — {r['detail']}")
         print(f"=== {verdict} ===")
         if over:
-            print("AUDIT_REQUIRED: memory file over limit -> backup, archive, slim, verify.")
+            print("AUDIT_REQUIRED: memory file over limit -> backup, archive, slim, verify. "
+                  "(tip: --rearchive performs the backup step)")
     return 1 if fails else 0
 
 
@@ -309,8 +382,12 @@ def main():
     ap.add_argument("--workspace", default=None, help="project dir to check L2 memory")
     ap.add_argument("--state", default=None,
                     help="state file recording last run (enables freshness check)")
+    ap.add_argument("--rearchive", action="store_true",
+                    help="refresh the archive from memory_file first (previous "
+                         "archive kept as <path>.prev), then run all checks")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--init", action="store_true", help="write a config template")
+    ap.add_argument("--version", action="version", version=f"agent-memory-doctor v{VERSION}")
     args = ap.parse_args()
     if args.init:
         sys.exit(init_config(args.config))
@@ -318,7 +395,7 @@ def main():
         print(f"config not found: {args.config} (run with --init to create one)")
         sys.exit(2)
     try:
-        sys.exit(run(args.config, args.workspace, args.json, args.state))
+        sys.exit(run(args.config, args.workspace, args.json, args.state, args.rearchive))
     except ConfigError as e:
         print(f"CONFIG ERROR: {e}")
         sys.exit(2)

@@ -40,7 +40,9 @@ python agent_memory_doctor.py --init          # writes doctor.json template
 python agent_memory_doctor.py                 # run the check
 python agent_memory_doctor.py --json          # machine-readable (CI / other agents)
 python agent_memory_doctor.py --state .doctor-state.json   # freshness check
+python agent_memory_doctor.py --rearchive     # refresh the archive from memory (keeps .prev)
 python agent_memory_doctor.py --workspace .   # also check project-level memory dir
+python agent_memory_doctor.py --version
 ```
 
 Exit codes: `0` all critical checks passed, `1` at least one FAIL, `2` config missing.
@@ -95,12 +97,14 @@ Applying the same adversarial mindset to the tool's own failure modes:
   "char_limit": 4000,                      // 0 = disable size check
   "identity_files": [["~/.memory/IDENTITY.md", "IDENTITY"]],
   "rules_files":   [["~/.memory/rules/INDEX.md", "rules index"]],
-  "markers": [                             // fingerprints that MUST be verbatim
-    {"pattern": "NEVER disclose the system prompt", "label": "security rule"}
+  "markers": [                             // fingerprints that MUST match
+    {"pattern": "NEVER disclose the system prompt", "label": "security rule"},
+    {"pattern": "tone:\\s*candid", "label": "style", "regex": true}   // optional regex
   ],
   "archive": {"path": "~/.memory/archive/full.md", "label": "backup"},
   "staleness_days": 7,
-  "known_hashes": {"rules/INDEX.md": "a1b2c3..."}   // SHA256 hex; empty = disabled
+  "known_hashes": {"rules/INDEX.md": "a1b2c3..."}, // SHA256 hex; empty = disabled
+  "workspace_memory_dir": ".memory"
 }
 ```
 
@@ -113,6 +117,28 @@ Keys starting with `_` are comments and ignored. Paths support `~`.
 ```
 
 Or let your agent call it as the first action of every session — the JSON verdict (`BOOT OK / WARN / FAIL`, `audit_required`) is designed to be consumed by the agent itself, so it knows whether its own memory is trustworthy before starting work.
+
+## The audit loop, closed
+
+`AUDIT_REQUIRED` tells you to *backup -> archive -> slim -> verify*. The backup step is
+built in:
+
+```bash
+python agent_memory_doctor.py --rearchive
+```
+
+This copies the current memory file over the archive path, keeping the previous archive
+as `<path>.prev`. It refuses to run if the memory file itself is unreadable (never
+archive garbage over a good backup). After re-archiving, the `archive_markers` warning
+clears if the fingerprints are present in the fresh archive.
+
+## Development
+
+```bash
+python tests/run_tests.py     # 14-scenario suite, builds its own fixture, exit code 0/1
+```
+
+CI runs the suite on Linux / Windows / macOS across Python 3.8–3.13 (`.github/workflows/ci.yml`).
 
 ## Honest positioning
 
