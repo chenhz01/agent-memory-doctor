@@ -8,6 +8,12 @@ This tool turns "I thought it was there" into a pass/fail report at boot time.
 
 Zero dependencies (stdlib only). Python 3.8+.
 
+v1.5 changes (SQLite session-store health):
+  - optional "session_db" config: health-checks persisted SQLite session stores
+    (openai-agents SQLiteSession compatible): PRAGMA integrity_check, required
+    tables (schema drift), freshness decay on a timestamp column
+  - always opens the database read-only (mode=ro) — a health check never writes
+
 v1.3 changes (gap-fill round):
   - --rearchive: perform the "backup -> archive" step the AUDIT_REQUIRED loop
     asks for (previous archive is kept as <archive>.prev)
@@ -47,10 +53,12 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 CONFIG_TEMPLATE = {
     "memory_file": "~/.memory/MEMORY.md",
@@ -80,6 +88,7 @@ CONFIG_TEMPLATE = {
     "_comment_known_hashes": "Supply-chain tamper detection: map of file path -> sha256 hex. Mismatch = FAIL. Generate with: python -c \"import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())\" <file>",
     "workspace_memory_dir": ".memory",
     "_comment_workspace": "Directory name checked under --workspace (project-level memory).",
+    "_comment_session_db": "Optional (v1.5) SQLite session-store health check, e.g. openai-agents SQLiteSession('sessions.db'): {\"path\": \"sessions.db\", \"label\": \"agent session store\", \"tables_required\": [\"agent_sessions\", \"agent_messages\"], \"integrity\": true, \"freshness\": {\"table\": \"agent_sessions\", \"column\": \"updated_at\", \"max_stale_hours\": 168}}",
 }
 
 MOJIBAKE = "\ufffd"
@@ -135,8 +144,11 @@ def load_config(cfg_path):
     cfg = {k: v for k, v in raw.items() if not k.startswith("_")}
 
     # Type/range validation — fail fast with a human-readable message
-    if not isinstance(cfg.get("memory_file", ""), str) or not cfg.get("memory_file"):
-        raise ConfigError("memory_file must be a non-empty string")
+    if not isinstance(cfg.get("memory_file", ""), str):
+        raise ConfigError("memory_file must be a string")
+    if not cfg.get("memory_file") and not cfg.get("session_db"):
+        raise ConfigError('memory_file must be a non-empty string '
+                          '(or provide a "session_db" config for session-only checks)')
     try:
         cfg["char_limit"] = int(cfg.get("char_limit", 4000))
     except (TypeError, ValueError):
@@ -171,6 +183,27 @@ def load_config(cfg_path):
         raise ConfigError("staleness_days must be an integer")
     if not isinstance(cfg.get("workspace_memory_dir", ".memory"), str):
         raise ConfigError("workspace_memory_dir must be a string")
+    # session_db (v1.5): SQLite session-store health check
+    sdb = cfg.get("session_db")
+    if sdb is not None:
+        if not isinstance(sdb, dict) or not isinstance(sdb.get("path", ""), str) or not sdb.get("path"):
+            raise ConfigError('session_db must be an object with a non-empty "path"')
+        tr = sdb.get("tables_required", [])
+        if not isinstance(tr, list) or not all(isinstance(t, str) and t for t in tr):
+            raise ConfigError("session_db.tables_required must be a list of non-empty table names")
+        fr = sdb.get("freshness")
+        if fr is not None:
+            if not isinstance(fr, dict):
+                raise ConfigError('session_db.freshness must be an object {table, column, max_stale_hours}')
+            for k in ("table", "column"):
+                v = fr.get(k, "")
+                # identifiers are interpolated into SQL -> restrict to plain names
+                if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", v):
+                    raise ConfigError(f"session_db.freshness.{k} must be a plain identifier (letters/digits/underscore)")
+            try:
+                fr["max_stale_hours"] = int(fr.get("max_stale_hours", 168))
+            except (TypeError, ValueError):
+                raise ConfigError("session_db.freshness.max_stale_hours must be an integer")
     return cfg
 
 
@@ -201,10 +234,111 @@ def rearchive(cfg, results):
         results.append(check("rearchive", False, f"archive write failed: {e}"))
 
 
+def _parse_ts(val):
+    """Parse a timestamp cell into unix epoch seconds, or None.
+
+    Accepts epoch ints/floats (ms tolerated) and ISO strings. Naive datetimes are
+    treated as UTC — this matches SQLite CURRENT_TIMESTAMP, which openai-agents
+    SQLiteSession uses for its updated_at/created_at columns.
+    """
+    if isinstance(val, (int, float)):
+        ts = float(val)
+        return ts / 1000.0 if ts > 1e12 else ts
+    s = str(val).strip()
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def check_session_db(cfg, results):
+    """Check 8 (v1.5) — SQLite session-store health: integrity, schema, freshness.
+
+    Opened strictly read-only; every query is guarded so a corrupt database
+    reports FAIL instead of crashing the boot check.
+    """
+    sdb = cfg.get("session_db") or {}
+    p = expand(sdb["path"])
+    label = sdb.get("label", "session store")
+    if not os.path.isfile(p):
+        results.append(check(f"session_db:{label}", False,
+                             f"missing session database: {p}"))
+        return
+    try:
+        conn = sqlite3.connect(f"file:{p.replace(os.sep, '/')}?mode=ro", uri=True)
+    except sqlite3.Error as e:
+        results.append(check(f"session_db:{label}", False,
+                             f"cannot open (not a sqlite db?): {e}"))
+        return
+    try:
+        # 8a — structural integrity: a corrupt db still deserializes, it just
+        # feeds agents subtly wrong context. This is the check that catches it.
+        if sdb.get("integrity", True):
+            try:
+                row = conn.execute("PRAGMA integrity_check").fetchone()
+            except sqlite3.DatabaseError as e:
+                results.append(check("session_integrity", False,
+                                     f"database corrupt: {e}"))
+            else:
+                ok = bool(row) and str(row[0]).strip().lower() == "ok"
+                results.append(check("session_integrity", ok,
+                                     "PRAGMA integrity_check: ok" if ok
+                                     else f"PRAGMA integrity_check: {row[0] if row else 'no result'}"))
+        # 8b — schema drift: SDK migrations/renames silently break session loading
+        required = sdb.get("tables_required", [])
+        try:
+            have = {r[0] for r in
+                    conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        except sqlite3.DatabaseError as e:
+            results.append(check("session_tables", False,
+                                 f"schema unreadable (corrupt db?): {e}"))
+        else:
+            missing = [t for t in required if t not in have]
+            if missing:
+                results.append(check("session_tables", False,
+                                     f"missing tables {missing} — schema drift or wrong db? "
+                                     f"(present: {sorted(have)})"))
+            else:
+                results.append(check("session_tables", True,
+                                     f"{len(required)} required table(s) present"))
+        # 8c — freshness decay: stale sessions mean the agent reloads outdated context
+        fr = sdb.get("freshness") or {}
+        if fr.get("table") and fr.get("column"):
+            tbl, col, max_hours = fr["table"], fr["column"], fr.get("max_stale_hours", 168)
+            try:
+                row = conn.execute(f'SELECT MAX("{tbl}"."{col}") FROM "{tbl}"').fetchone()
+            except sqlite3.DatabaseError as e:
+                results.append(check("session_freshness", False,
+                                     f"freshness query failed: {e}", warn=True))
+            else:
+                ts = _parse_ts(row[0]) if row else None
+                if ts is None:
+                    results.append(check("session_freshness", False,
+                                         f"no rows / unparseable timestamp in {tbl}.{col} "
+                                         f"(epoch or ISO expected)", warn=True))
+                else:
+                    age_h = (time.time() - ts) / 3600.0
+                    stale = age_h > max_hours
+                    results.append(check("session_freshness", not stale,
+                                         f"newest row {age_h:.1f}h old (limit {max_hours}h)"
+                                         + (" — stale: agent may be resuming outdated context"
+                                            if stale else ""),
+                                         warn=stale))
+    finally:
+        conn.close()
+
+
 def run(cfg_path, workspace=None, as_json=False, state_path=None, do_rearchive=False):
     cfg = load_config(cfg_path)
 
-    mem_path = expand(cfg["memory_file"])
+    mem_path = expand(cfg["memory_file"]) if cfg.get("memory_file") else None
     limit = cfg["char_limit"]
     results = []
 
@@ -216,34 +350,36 @@ def run(cfg_path, workspace=None, as_json=False, state_path=None, do_rearchive=F
         results.append(check(f"file:{label}", exists,
                              f"{p} ({size}B)" if exists else f"missing: {p}"))
 
-    # Check 2 — convention fingerprints in memory file
-    mem = safe_read(mem_path) if os.path.isfile(mem_path) else None
-    markers = cfg.get("markers", [])
-    if mem is None:
-        results.append(check("memory_file", False,
-                             f"not found or unreadable: {mem_path}"))
-    else:
-        if MOJIBAKE in mem:
-            results.append(check("memory_encoding", False,
-                                 "memory file contains U+FFFD — it was probably not "
-                                 "saved as UTF-8; fingerprint matching may silently fail",
-                                 warn=True))
-        missing = [m for m in markers if not marker_hit(m, mem)]
-        if missing:
-            labels = [f"{m.get('label', '?')} ({m['pattern'][:30]})" for m in missing]
-            results.append(check("markers", False,
-                                 f"missing fingerprints: {labels} — restore from archive"))
+    # Check 2/3 — memory file checks (skipped entirely in session-only configs)
+    chars, over = 0, False
+    if mem_path:
+        mem = safe_read(mem_path) if os.path.isfile(mem_path) else None
+        markers = cfg.get("markers", [])
+        if mem is None:
+            results.append(check("memory_file", False,
+                                 f"not found or unreadable: {mem_path}"))
         else:
-            results.append(check("markers", True,
-                                 f"{len(markers)} fingerprints in place"))
+            if MOJIBAKE in mem:
+                results.append(check("memory_encoding", False,
+                                     "memory file contains U+FFFD — it was probably not "
+                                     "saved as UTF-8; fingerprint matching may silently fail",
+                                     warn=True))
+            missing = [m for m in markers if not marker_hit(m, mem)]
+            if missing:
+                labels = [f"{m.get('label', '?')} ({m['pattern'][:30]})" for m in missing]
+                results.append(check("markers", False,
+                                     f"missing fingerprints: {labels} — restore from archive"))
+            else:
+                results.append(check("markers", True,
+                                     f"{len(markers)} fingerprints in place"))
 
-    # Check 3 — memory size budget (injection dilution guard); 0 = disabled
-    chars = len(mem) if mem is not None else 0
-    over = bool(limit) and chars > limit
-    results.append(check("memory_size", not over,
-                         f"{chars}/{limit} chars" + ("" if not over
-                         else " — AUDIT_REQUIRED: backup -> archive -> slim -> verify"),
-                         warn=over))
+        # Check 3 — memory size budget (injection dilution guard); 0 = disabled
+        chars = len(mem)
+        over = bool(limit) and chars > limit
+        results.append(check("memory_size", not over,
+                             f"{chars}/{limit} chars" + ("" if not over
+                             else " — AUDIT_REQUIRED: backup -> archive -> slim -> verify"),
+                             warn=over))
 
     # Action — --rearchive closes the "backup -> archive" step of the audit loop
     if do_rearchive:
@@ -299,6 +435,10 @@ def run(cfg_path, workspace=None, as_json=False, state_path=None, do_rearchive=F
                                  f"SHA256 drifted — file changed since fingerprint (tamper or upgrade): {p}"))
         else:
             results.append(check(f"hash:{rel}", True, "SHA256 match"))
+
+    # Check 8 (v1.5) — SQLite session stores, optional
+    if cfg.get("session_db"):
+        check_session_db(cfg, results)
 
     # Check 6 — self-check freshness (v1.1, review event "50 sessions without a check")
     if state_path:

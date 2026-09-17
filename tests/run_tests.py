@@ -163,6 +163,82 @@ def main():
         rc, out, _ = run_doctor(root, "--config", "doctor.json", "--state", "state.json")
         test("T14 freshness stale->WARN, fresh->quiet", stale_warn and "staleness_days" not in out, out)
 
+        # ---- v1.5: SQLite session-store checks (openai-agents SQLiteSession schema) ----
+        import sqlite3 as _sq
+
+        sdb_path = os.path.join(root, "sessions.db")
+
+        def make_sessions_db(with_updated=True):
+            if os.path.exists(sdb_path):
+                os.remove(sdb_path)
+            conn = _sq.connect(sdb_path)
+            conn.execute("CREATE TABLE agent_sessions (session_id TEXT PRIMARY KEY,"
+                         " created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+                         " updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+            conn.execute("CREATE TABLE agent_messages (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                         " session_id TEXT NOT NULL, message_data TEXT NOT NULL,"
+                         " created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+            # SQLite CURRENT_TIMESTAMP is UTC — mirror that for freshness realism
+            fresh = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() - 3600))
+            conn.execute("INSERT INTO agent_sessions (session_id, updated_at) VALUES (?, ?)",
+                         ("s1", fresh if with_updated else "2020-01-01 00:00:00"))
+            conn.execute("INSERT INTO agent_messages (session_id, message_data) VALUES (?, ?)",
+                         ("s1", '{"role":"user","content":"hi"}'))
+            conn.commit()
+            conn.close()
+
+        def session_cfg(**over):
+            mem2 = os.path.join(root, "session_mem.md")
+            write(mem2, "tiny memory file\n")
+            s = {"path": sdb_path, "label": "agents sdk session store",
+                 "tables_required": ["agent_sessions", "agent_messages"], "integrity": True,
+                 "freshness": {"table": "agent_sessions", "column": "updated_at",
+                               "max_stale_hours": 168}}
+            s.update(over)
+            cfg2 = {"memory_file": mem2, "session_db": s}
+            write(os.path.join(root, "session.json"), json.dumps(cfg2))
+            return "session.json"
+
+        # T15 — healthy session db -> all session checks green, rc 0
+        make_sessions_db()
+        rc, out, _ = run_doctor(root, "--config", session_cfg())
+        test("T15 session db healthy -> PASS rc=0",
+             rc == 0 and "integrity_check: ok" in out and "2 required table(s)" in out, out)
+
+        # T16 — stale sessions (7-day-old row, 168h limit) -> WARN, rc stays 0
+        make_sessions_db(with_updated=False)
+        rc, out, _ = run_doctor(root, "--config", session_cfg())
+        test("T16 stale session -> WARN rc=0",
+             rc == 0 and "newest row" in out and "outdated context" in out, out)
+
+        # T17 — schema drift: required table missing -> FAIL rc=1
+        conn = _sq.connect(sdb_path)
+        conn.execute("DROP TABLE agent_messages")
+        conn.commit(); conn.close()
+        rc, out, _ = run_doctor(root, "--config", session_cfg())
+        test("T17 schema drift -> FAIL rc=1",
+             rc == 1 and "schema drift or wrong db" in out, out)
+
+        # T18 — corrupt db (valid name, garbage bytes) -> FAIL rc=1, no traceback
+        make_sessions_db()
+        with open(sdb_path, "wb") as f:
+            f.write(b"this is definitely not a sqlite database" * 32)
+        rc, out, err = run_doctor(root, "--config", session_cfg())
+        test("T18 corrupt db -> FAIL rc=1",
+             rc == 1 and "session_integrity" in out and "Traceback" not in err, out + err)
+
+        # T19 — missing session db file -> FAIL rc=1
+        os.remove(sdb_path)
+        rc, out, _ = run_doctor(root, "--config", session_cfg())
+        test("T19 missing session db -> FAIL rc=1",
+             rc == 1 and "missing session database" in out, out)
+
+        # T20 — SQL-injection-shaped identifiers rejected at config load (exit 2)
+        evil = session_cfg(freshness={"table": "agent_sessions; DROP TABLE agent_sessions",
+                                      "column": "updated_at", "max_stale_hours": 168})
+        rc, out, _ = run_doctor(root, "--config", evil)
+        test("T20 evil identifier -> exit 2", rc == 2 and "plain identifier" in out, out)
+
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

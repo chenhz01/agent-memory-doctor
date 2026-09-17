@@ -7,3 +7,5 @@ tests/fixture/.memory/
 .doctor-state.json
 tests/fixture/run-state.json
 tests/fixture/target.txt
+dist/
+sessions.db
