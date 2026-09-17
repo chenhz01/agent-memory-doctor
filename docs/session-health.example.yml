@@ -1,0 +1,31 @@
+# Health-check persisted agent session stores in CI (agent-memory-doctor v1.5+).
+# Verified against openai-agents SQLiteSession: agent_sessions/agent_messages tables.
+# Requires a persistent session db — SQLiteSession("sessions.db"), not the ":memory:" default.
+name: session-health
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily, before agents resume
+  workflow_dispatch:
+
+jobs:
+  doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install agent-memory-doctor
+        run: pip install agent-memory-doctor
+
+      - name: Health-check persisted sessions
+        run: |
+          agent-memory-doctor --config doctor.session.json
+
+      # Optional: machine-readable report as the job summary
+      - name: JSON report to job summary
+        if: always()
+        run: agent-memory-doctor --config doctor.session.json --json >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,14 @@
+{
+  "_comment": "Health-check config for a persisted SQLite session store — verified against openai-agents SQLiteSession schema (agent_sessions / agent_messages, SQLite CURRENT_TIMESTAMP timestamps). NOTE: SQLiteSession defaults to an in-memory db that is lost when the process ends; pass a file path to make this check meaningful.",
+  "session_db": {
+    "path": "sessions.db",
+    "label": "agents sdk session store",
+    "tables_required": ["agent_sessions", "agent_messages"],
+    "integrity": true,
+    "freshness": {
+      "table": "agent_sessions",
+      "column": "updated_at",
+      "max_stale_hours": 168
+    }
+  }
+}

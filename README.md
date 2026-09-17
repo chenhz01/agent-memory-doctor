@@ -47,6 +47,9 @@ agent (or your CI) can act on.
 | `archive_markers` | archive no longer contains the fingerprints (restoring it would silently drop conventions) |
 | `hash:*` | a file listed in `known_hashes` changed since fingerprinting (tamper or upgrade) |
 | `freshness` | last recorded run (via `--state`) is older than `staleness_days` |
+| `session_integrity` | optional: SQLite session db fails `PRAGMA integrity_check` (opens fine but feeds agents corrupt rows) |
+| `session_tables` | optional: required session tables missing — schema drift after an SDK migration |
+| `session_freshness` | optional: newest row in the session store is older than `max_stale_hours` (WARN — agent may resume outdated context) |
 | `workspace_memory` | optional: project-level memory dir not initialized |
 
 ## Quick start
@@ -81,6 +84,16 @@ Exit codes: `0` all critical checks passed, `1` at least one FAIL, `2` config er
 The JSON verdict (`BOOT OK / WARN / FAIL`, `audit_required`) is designed to be consumed
 by the agent itself, so it knows whether its own memory is trustworthy before doing work.
 
+### Health-check persisted session stores (SQLite, v1.5+)
+
+Agents persist conversation state across runs. Those stores drift **silently**:
+a corrupted SQLite file still deserializes — it just feeds the agent subtly wrong
+context — and an SDK migration can rename tables out from under you.
+
+`session_db` adds CI-verifiable health checks for persisted SQLite session stores.
+Schema verified against [openai-agents `SQLiteSession`](https://github.com/openai/openai-agents-python)
+(`agent_sessions` / `agent_messages`):
+
 <details>
 <summary>Config reference</summary>
 
@@ -104,6 +117,32 @@ by the agent itself, so it knows whether its own memory is trustworthy before do
 Keys starting with `_` are comments and ignored. Paths support `~`.
 
 </details>
+
+```jsonc
+// doctor.session.json — verified against openai-agents SQLiteSession schema
+{
+  "session_db": {
+    "path": "sessions.db",                      // SQLiteSession("sessions.db") — NOT the ":memory:" default
+    "label": "agents sdk session store",
+    "tables_required": ["agent_sessions", "agent_messages"],
+    "integrity": true,                          // PRAGMA integrity_check
+    "freshness": {                              // optional: stale-session guard
+      "table": "agent_sessions",
+      "column": "updated_at",                   // epoch or ISO; naive = UTC (SQLite CURRENT_TIMESTAMP)
+      "max_stale_hours": 168
+    }
+  }
+}
+```
+
+The db is always opened **read-only** (`mode=ro`) — a health check never writes to
+your session data. Run it in CI daily, before agents resume:
+
+```yaml
+# see docs/session-health.example.yml for the full workflow
+- name: Health-check persisted sessions
+  run: agent-memory-doctor --config doctor.session.json
+```
 
 ## The hygiene loop
 
@@ -169,7 +208,7 @@ If that's you: open an [issue](../../issues) or reach out by email —
 ## Development
 
 ```bash
-python tests/run_tests.py     # 14-scenario suite, builds its own fixture, exit code 0/1
+python tests/run_tests.py     # 20-scenario suite, builds its own fixture, exit code 0/1
 ```
 
 CI runs the suite on Linux / Windows / macOS across Python 3.8–3.13
