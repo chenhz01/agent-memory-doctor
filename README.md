@@ -1,5 +1,23 @@
 # agent-memory-doctor
 
+> **Stop your AI agent from silently forgetting its own rules**
+
+
+
+## Install (one line)
+```bash
+见仓内说明
+```
+
+## Why not X?
+（见下方原文档）
+
+Topics: `agent-memory` · `ai-safety` · `integrity` · `cli` · `zero-dependency`
+
+---
+
+# agent-memory-doctor
+
 [![CI](https://github.com/chenhz01/agent-memory-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/chenhz01/agent-memory-doctor/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
